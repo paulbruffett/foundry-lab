@@ -52,7 +52,8 @@ resource "azapi_resource" "claude_haiku" {
         organizationName = var.model_provider_organization_name
         countryCode      = var.model_provider_country_code
       }
-      raiPolicyName = "Microsoft.Nill"
+      # No `raiPolicyName`: Anthropic deployments don't accept Azure RAI
+      # policies — Anthropic's own classifiers run server-side.
     }
     sku = {
       name     = "GlobalStandard"

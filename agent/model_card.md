@@ -18,9 +18,10 @@ Agent Service. Not for production workloads, PHI/PII, or regulated decisions.
 - **Tools:** none in MVP
 
 ## Safety
-- No built-in Azure content filter (`raiPolicyName = "Microsoft.Nill"`); the
-  model's own safety classifiers apply. Add a Foundry content-safety policy
-  before exposing externally.
+- Anthropic models on Foundry don't accept an Azure RAI policy; Anthropic's
+  own safety classifiers run server-side. If you need additional Azure
+  content-safety filtering, route requests through Azure AI Content Safety
+  separately before/after the model call.
 - A2A wrapper does no auth today — gate the public URL behind APIM or an
   ingress with Entra auth before registering it in Foundry Control Plane.
 
