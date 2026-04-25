@@ -47,6 +47,11 @@ resource "azapi_resource" "claude_haiku" {
         version   = var.haiku_model_version
         publisher = "Anthropic"
       }
+      modelProviderData = {
+        industry         = var.model_provider_industry
+        organizationName = var.model_provider_organization_name
+        countryCode      = var.model_provider_country_code
+      }
       raiPolicyName = "Microsoft.Nill"
     }
     sku = {

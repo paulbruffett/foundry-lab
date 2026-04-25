@@ -57,6 +57,24 @@ variable "haiku_capacity" {
   default     = 1
 }
 
+variable "model_provider_industry" {
+  type        = string
+  description = "Industry of the deploying organization. Required by Anthropic Marketplace."
+  default     = "Technology"
+}
+
+variable "model_provider_organization_name" {
+  type        = string
+  description = "Legal organization name of the deploying customer. Required by Anthropic Marketplace."
+  default     = "Foundry Lab"
+}
+
+variable "model_provider_country_code" {
+  type        = string
+  description = "ISO 3166-1 alpha-2 country code of the deploying organization."
+  default     = "US"
+}
+
 variable "tags" {
   type = map(string)
   default = {
