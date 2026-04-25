@@ -32,6 +32,11 @@ env:
   TF_VAR_foundry_account_resource_group: ${{ vars.FOUNDRY_ACCOUNT_RESOURCE_GROUP }}
   TF_VAR_project_name: ${{ vars.PROJECT_NAME }}
   TF_VAR_location: ${{ vars.LOCATION }}
+  # Optional Anthropic Marketplace metadata. The `|| 'default'` fallback
+  # avoids passing an empty string when the GitHub variable is unset.
+  TF_VAR_model_provider_industry: ${{ vars.MODEL_PROVIDER_INDUSTRY || 'Education' }}
+  TF_VAR_model_provider_organization_name: ${{ vars.MODEL_PROVIDER_ORGANIZATION_NAME || 'Home Use' }}
+  TF_VAR_model_provider_country_code: ${{ vars.MODEL_PROVIDER_COUNTRY_CODE || 'US' }}
 
 jobs:
   terraform:
