@@ -34,14 +34,13 @@ def main() -> int:
 
     client = AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential())
 
+    # PromptAgentDefinition doesn't currently accept arbitrary metadata.
+    # Model-card pointer lives on the deployment as a tag (see main.tf);
+    # the A2A wrapper publishes the agent's discovery card separately.
     definition = PromptAgentDefinition(
         model=deployment,
         instructions=INSTRUCTIONS,
         tools=[],
-        metadata={
-            "modelCard": MODEL_CARD.read_text(encoding="utf-8") if MODEL_CARD.exists() else "",
-            "protocols": "a2a",
-        },
     )
 
     version = client.agents.create_version(
