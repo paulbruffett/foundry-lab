@@ -20,13 +20,13 @@ variable "project_name" {
 }
 
 variable "project_display_name" {
-  type        = string
-  default     = "Foundry Lab"
+  type    = string
+  default = "Foundry Lab"
 }
 
 variable "project_description" {
-  type        = string
-  default     = "MVP Foundry project managed by Terraform."
+  type    = string
+  default = "MVP Foundry project managed by Terraform."
 }
 
 variable "location" {
@@ -41,8 +41,8 @@ variable "location" {
 }
 
 variable "haiku_deployment_name" {
-  type        = string
-  default     = "claude-haiku-4-5"
+  type    = string
+  default = "claude-haiku-4-5"
 }
 
 variable "haiku_model_version" {
@@ -63,4 +63,5 @@ variable "tags" {
     project   = "foundry-lab"
     managedBy = "terraform"
   }
+  description = "Tags applied to managed resources."
 }
