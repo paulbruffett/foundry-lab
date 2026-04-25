@@ -1,0 +1,5 @@
+subscription_id                = "00000000-0000-0000-0000-000000000000"
+foundry_account_name           = "my-existing-foundry"
+foundry_account_resource_group = "my-foundry-rg"
+project_name                   = "foundry-lab"
+location                       = "eastus2"

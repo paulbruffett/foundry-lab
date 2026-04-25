@@ -1,0 +1,98 @@
+"""A2A wrapper around the Foundry test agent.
+
+Foundry Agent Service does NOT natively expose agents over A2A. To publish
+via A2A you stand up an A2A-compatible HTTP endpoint that proxies to the
+Foundry agent, then register that URL in Foundry Control Plane.
+
+This module exposes:
+  GET  /.well-known/agent-card.json   — A2A discovery document
+  POST /a2a/messages                   — A2A message endpoint (proxies to Foundry)
+
+Run locally:
+  PROJECT_ENDPOINT=... HAIKU_DEPLOYMENT_NAME=... \\
+    uvicorn a2a_server:app --host 0.0.0.0 --port 8080
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from azure.ai.projects import AIProjectClient
+from azure.identity import DefaultAzureCredential
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from agent import AGENT_NAME
+
+app = FastAPI(title="foundry-lab-a2a")
+
+_client: AIProjectClient | None = None
+
+
+def _project() -> AIProjectClient:
+    global _client
+    if _client is None:
+        _client = AIProjectClient(
+            endpoint=os.environ["PROJECT_ENDPOINT"],
+            credential=DefaultAzureCredential(),
+        )
+    return _client
+
+
+@app.get("/.well-known/agent-card.json")
+def agent_card() -> dict[str, Any]:
+    # A2A agent-card spec: https://a2a.googleapis.com / Microsoft A2A registration docs
+    public_url = os.environ.get("A2A_PUBLIC_URL", "http://localhost:8080")
+    return {
+        "name": AGENT_NAME,
+        "description": "Foundry Lab test agent wrapped for A2A.",
+        "url": f"{public_url}/a2a/messages",
+        "version": "0.1.0",
+        "protocols": ["a2a/v1"],
+        "capabilities": {"streaming": False, "tools": []},
+        "provider": {"organization": "foundry-lab"},
+        "skills": [
+            {
+                "id": "chat",
+                "name": "chat",
+                "description": "General chat via Claude Haiku 4.5 on Foundry.",
+            }
+        ],
+    }
+
+
+class A2AMessage(BaseModel):
+    role: str
+    parts: list[dict[str, Any]]
+
+
+class A2ARequest(BaseModel):
+    messages: list[A2AMessage]
+    threadId: str | None = None
+
+
+@app.post("/a2a/messages")
+def a2a_messages(req: A2ARequest) -> dict[str, Any]:
+    client = _project()
+    user_text = next(
+        (p.get("text", "") for m in req.messages if m.role == "user" for p in m.parts if p.get("type") == "text"),
+        "",
+    )
+    if not user_text:
+        raise HTTPException(400, "no user text part")
+
+    thread = client.agents.threads.create() if not req.threadId else client.agents.threads.get(req.threadId)
+    client.agents.messages.create(thread_id=thread.id, role="user", content=user_text)
+    run = client.agents.runs.create_and_process(thread_id=thread.id, agent_name=AGENT_NAME)
+
+    if run.status != "completed":
+        raise HTTPException(502, f"agent run failed: {run.status}")
+
+    msgs = list(client.agents.messages.list(thread_id=thread.id, order="desc", limit=1))
+    reply = msgs[0].content[0].text.value if msgs else ""
+
+    return {
+        "threadId": thread.id,
+        "messages": [{"role": "assistant", "parts": [{"type": "text", "text": reply}]}],
+    }

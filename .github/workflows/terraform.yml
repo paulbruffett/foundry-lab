@@ -1,0 +1,112 @@
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - 'agent/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - 'agent/**'
+      - '.github/workflows/terraform.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_foundry_account_name: ${{ vars.FOUNDRY_ACCOUNT_NAME }}
+  TF_VAR_foundry_account_resource_group: ${{ vars.FOUNDRY_ACCOUNT_RESOURCE_GROUP }}
+  TF_VAR_project_name: ${{ vars.PROJECT_NAME }}
+  TF_VAR_location: ${{ vars.LOCATION }}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      project_endpoint: ${{ steps.outputs.outputs.project_endpoint }}
+      haiku_deployment_name: ${{ steps.outputs.outputs.haiku_deployment_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=foundry-lab.tfstate"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        id: plan
+        run: terraform plan -out=tfplan -input=false
+
+      - name: terraform apply
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: capture outputs
+        id: outputs
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "project_endpoint=$(terraform output -raw project_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "haiku_deployment_name=$(terraform output -raw haiku_deployment_name)" >> "$GITHUB_OUTPUT"
+
+  agent:
+    needs: terraform
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_ENDPOINT: ${{ needs.terraform.outputs.project_endpoint }}
+      HAIKU_DEPLOYMENT_NAME: ${{ needs.terraform.outputs.haiku_deployment_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install agent deps
+        working-directory: agent
+        run: pip install -r requirements.txt
+
+      - name: upsert test agent
+        working-directory: agent
+        run: python agent.py
