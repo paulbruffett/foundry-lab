@@ -257,7 +257,7 @@ cd ../agent && pip install -r requirements.txt && python agent.py
   2. **agent** — `agent.py` upserts the Foundry test agent against the freshly-applied project.
   3. **a2a** — `az acr build` builds the wrapper image from `../agent/Dockerfile`, pushes to ACR, then `az containerapp update --image` rolls the Container App. The job logs the public URL and the discovery-document path you paste into Foundry Control Plane.
 
-The Container App is created with a public placeholder image (`mcr.microsoft.com/azuredocs/containerapps-helloworld`) and `lifecycle.ignore_changes` on the image field — first apply will succeed even though the wrapper isn't built yet, and CI takes over from there.
+The Container App is created with a public placeholder image (`nginxinc/nginx-unprivileged:alpine`, chosen because it listens on 8080 to match ingress) and `lifecycle.ignore_changes` on the image field — first apply will succeed even though the wrapper isn't built yet, and CI takes over from there.
 
 ## Registering the A2A endpoint with Foundry Control Plane
 

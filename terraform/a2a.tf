@@ -68,10 +68,11 @@ resource "azurerm_container_app" "a2a" {
 
     container {
       name = "a2a-server"
-      # Public placeholder — CI replaces this with the ACR image. The
-      # ignore_changes block below stops subsequent applies from rolling
+      # Public placeholder that listens on 8080 (matches ingress.target_port,
+      # so the bootstrap revision goes healthy). CI replaces this with the
+      # ACR image; ignore_changes below stops subsequent applies from rolling
       # the deployed image back to this bootstrap value.
-      image  = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      image  = "nginxinc/nginx-unprivileged:alpine"
       cpu    = 0.25
       memory = "0.5Gi"
 
