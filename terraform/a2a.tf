@@ -1,0 +1,149 @@
+# A2A wrapper hosting — Container Apps fronting agent/a2a_server.py.
+# Foundry has no native A2A endpoint; this wrapper proxies into the
+# Foundry data plane and is what gets registered in Foundry Control Plane.
+
+data "azurerm_client_config" "current" {}
+
+data "azurerm_resource_group" "a2a" {
+  name = var.a2a_resource_group_name
+}
+
+resource "azurerm_container_registry" "a2a" {
+  name                = var.acr_name
+  resource_group_name = data.azurerm_resource_group.a2a.name
+  location            = data.azurerm_resource_group.a2a.location
+  sku                 = "Basic"
+  admin_enabled       = false
+
+  tags = var.tags
+}
+
+resource "azurerm_log_analytics_workspace" "a2a" {
+  name                = "${var.container_app_name}-logs"
+  resource_group_name = data.azurerm_resource_group.a2a.name
+  location            = data.azurerm_resource_group.a2a.location
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+
+  tags = var.tags
+}
+
+resource "azurerm_container_app_environment" "a2a" {
+  name                       = "${var.container_app_name}-env"
+  resource_group_name        = data.azurerm_resource_group.a2a.name
+  location                   = data.azurerm_resource_group.a2a.location
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.a2a.id
+
+  tags = var.tags
+}
+
+resource "azurerm_container_app" "a2a" {
+  name                         = var.container_app_name
+  resource_group_name          = data.azurerm_resource_group.a2a.name
+  container_app_environment_id = azurerm_container_app_environment.a2a.id
+  revision_mode                = "Single"
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  registry {
+    server   = azurerm_container_registry.a2a.login_server
+    identity = "System"
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8080
+    transport        = "auto"
+    traffic_weight {
+      percentage      = 100
+      latest_revision = true
+    }
+  }
+
+  template {
+    min_replicas = 0
+    max_replicas = 1
+
+    container {
+      name = "a2a-server"
+      # Public placeholder — CI replaces this with the ACR image. The
+      # ignore_changes block below stops subsequent applies from rolling
+      # the deployed image back to this bootstrap value.
+      image  = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      env {
+        name  = "PROJECT_ENDPOINT"
+        value = try(azapi_resource.project.output.properties.endpoints["AI Foundry API"], "")
+      }
+      env {
+        name  = "HAIKU_DEPLOYMENT_NAME"
+        value = azapi_resource.claude_haiku.name
+      }
+      env {
+        name  = "A2A_PUBLIC_URL"
+        value = "https://${var.container_app_name}.${azurerm_container_app_environment.a2a.default_domain}"
+      }
+    }
+  }
+
+  tags = var.tags
+
+  lifecycle {
+    ignore_changes = [
+      template[0].container[0].image,
+    ]
+  }
+}
+
+# Container App identity needs to pull from ACR.
+resource "azurerm_role_assignment" "a2a_acr_pull" {
+  scope                = azurerm_container_registry.a2a.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_container_app.a2a.identity[0].principal_id
+}
+
+# Container App identity calls the Foundry data plane the same way agent.py does.
+resource "azurerm_role_assignment" "a2a_foundry_data_plane" {
+  scope                = data.azurerm_cognitive_account.foundry.id
+  role_definition_name = "Azure AI Project Manager"
+  principal_id         = azurerm_container_app.a2a.identity[0].principal_id
+}
+
+# EasyAuth (Container Apps authConfig). azurerm doesn't model this resource;
+# using azapi against Microsoft.App/containerApps/authConfigs.
+# Pre-req: the Entra app reg referenced by var.a2a_aad_client_id exists with
+# App ID URI = api://<clientId>. See README for bootstrap.
+resource "azapi_resource" "a2a_easyauth" {
+  type      = "Microsoft.App/containerApps/authConfigs@2024-03-01"
+  name      = "current"
+  parent_id = azurerm_container_app.a2a.id
+
+  body = {
+    properties = {
+      platform = {
+        enabled = true
+      }
+      globalValidation = {
+        unauthenticatedClientAction = "Return401"
+      }
+      identityProviders = {
+        azureActiveDirectory = {
+          enabled = true
+          registration = {
+            openIdIssuer = "https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0"
+            clientId     = var.a2a_aad_client_id
+          }
+          validation = {
+            allowedAudiences = ["api://${var.a2a_aad_client_id}"]
+          }
+        }
+      }
+    }
+  }
+
+  schema_validation_enabled = false
+}

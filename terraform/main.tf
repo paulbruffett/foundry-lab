@@ -61,9 +61,7 @@ resource "azapi_resource" "claude_haiku" {
     }
   }
 
-  tags = merge(var.tags, {
-    modelCard = "agent/model_card.md"
-  })
+  tags = var.tags
 
   schema_validation_enabled = false
   response_export_values    = ["*"]

@@ -23,3 +23,24 @@ output "haiku_endpoint" {
   description = "Anthropic Messages API base URL on Foundry."
   value       = "${data.azurerm_cognitive_account.foundry.endpoint}anthropic/v1/messages"
 }
+
+output "acr_name" {
+  value = azurerm_container_registry.a2a.name
+}
+
+output "acr_login_server" {
+  value = azurerm_container_registry.a2a.login_server
+}
+
+output "container_app_name" {
+  value = azurerm_container_app.a2a.name
+}
+
+output "a2a_resource_group" {
+  value = data.azurerm_resource_group.a2a.name
+}
+
+output "a2a_public_url" {
+  description = "Public FQDN of the A2A wrapper. Register {url}/.well-known/agent-card.json in Foundry Control Plane."
+  value       = "https://${azurerm_container_app.a2a.ingress[0].fqdn}"
+}

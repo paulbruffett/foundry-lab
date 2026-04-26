@@ -1,13 +1,14 @@
 # Terraform — Foundry Lab
 
-Manages an Azure AI Foundry **project** + **Claude Haiku 4.5 deployment** under a pre-existing Foundry account (Microsoft.CognitiveServices, kind = `AIServices`). Agents are created out-of-band by `../agent/agent.py` because they're a data-plane construct, not an ARM resource.
+Manages an Azure AI Foundry **project** + **Claude Haiku 4.5 deployment** under a pre-existing Foundry account (Microsoft.CognitiveServices, kind = `AIServices`), plus the **A2A wrapper** (Container Apps + ACR) that publishes the agent for cross-platform consumption. Agents themselves are created out-of-band by `../agent/agent.py` because they're a Foundry data-plane construct, not an ARM resource.
 
 ```
 providers.tf            azapi + azurerm provider pinning
 backend.tf              azurerm remote state (Entra auth)
 variables.tf            inputs + region validation
-main.tf                 project + Claude Haiku deployment
-outputs.tf              endpoints + IDs consumed by the agent step
+main.tf                 Foundry project + Claude Haiku deployment
+a2a.tf                  ACR + Container Apps + EasyAuth for the A2A wrapper
+outputs.tf              endpoints + IDs consumed by the agent + a2a steps
 terraform.tfvars.example
 ```
 
@@ -148,7 +149,30 @@ az role assignment create \
   --assignee-principal-type ServicePrincipal \
   --role "Azure AI Project Manager" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
+
+# A2A RG — Contributor needed for Container Apps + ACR + Log Analytics
+A2A_RG="foundry-lab-a2a"
+az group create -n "$A2A_RG" -l "$LOCATION"
+
+az role assignment create \
+  --assignee-object-id "$SP_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Contributor" \
+  --scope "/subscriptions/$SUB_ID/resourceGroups/$A2A_RG"
 ```
+
+### 5a. Entra app registration for the A2A EasyAuth gate
+
+The A2A Container App is fronted by Container Apps EasyAuth. Create a single-tenant app registration whose `clientId` is what EasyAuth treats as the audience.
+
+```bash
+A2A_APP_NAME="foundry-lab-a2a"
+A2A_APP_ID=$(az ad app create --display-name "$A2A_APP_NAME" --query appId -o tsv)
+az ad app update --id "$A2A_APP_ID" --identifier-uris "api://$A2A_APP_ID"
+echo "A2A_AAD_CLIENT_ID = $A2A_APP_ID"
+```
+
+Callers acquire a token for `api://$A2A_APP_ID` (e.g. `az account get-access-token --resource api://$A2A_APP_ID`) and pass it as `Authorization: Bearer <token>`. EasyAuth rejects unauthenticated requests with `401`.
 
 ### 6. Sign the Anthropic Marketplace agreement
 
@@ -182,6 +206,9 @@ az provider register --namespace Microsoft.SaaS
 | `FOUNDRY_ACCOUNT_RESOURCE_GROUP` | `$FOUNDRY_RG` |
 | `PROJECT_NAME` | e.g. `foundry-lab` |
 | `LOCATION` | `eastus2` or `swedencentral` (Claude-supported regions only) |
+| `A2A_RESOURCE_GROUP` | `$A2A_RG` from step 5 |
+| `ACR_NAME` | globally-unique alphanumeric ACR name (5-50 chars) |
+| `A2A_AAD_CLIENT_ID` | `$A2A_APP_ID` from step 5a |
 
 ## Local development
 
@@ -213,11 +240,20 @@ cd ../agent && pip install -r requirements.txt && python agent.py
 `.github/workflows/terraform.yml` runs on every push and PR touching `terraform/`, `agent/`, or the workflow itself:
 
 - PRs → `terraform plan` only.
-- Push to `main` → `plan` + `apply`, then `agent.py` upserts the test agent against the freshly-applied project.
+- Push to `main` → three sequential jobs:
+  1. **terraform** — `plan` + `apply` (Foundry project, Haiku deployment, ACR, Container Apps env, Container App, EasyAuth).
+  2. **agent** — `agent.py` upserts the Foundry test agent against the freshly-applied project.
+  3. **a2a** — `az acr build` builds the wrapper image from `../agent/Dockerfile`, pushes to ACR, then `az containerapp update --image` rolls the Container App. The job logs the public URL and the discovery-document path you paste into Foundry Control Plane.
+
+The Container App is created with a public placeholder image (`mcr.microsoft.com/azuredocs/containerapps-helloworld`) and `lifecycle.ignore_changes` on the image field — first apply will succeed even though the wrapper isn't built yet, and CI takes over from there.
+
+## Registering the A2A endpoint with Foundry Control Plane
+
+There is no clean Terraform/azapi resource for A2A registration today. After the `a2a` job logs the public URL, paste `${A2A_PUBLIC_URL}/.well-known/agent-card.json` into **Foundry Control Plane → Connected agents → Add A2A endpoint** in the portal.
 
 ## Gotchas
 
 - **Region:** Claude Haiku 4.5 only ships in `eastus2` and `swedencentral`. `variables.tf` enforces this.
-- **`raiPolicyName = "Microsoft.Nill"`:** Claude has no Azure content filter. Add a Foundry content-safety policy before any external exposure.
-- **A2A:** Foundry doesn't natively publish agents over A2A. `../agent/a2a_server.py` is the wrapper you register in Foundry Control Plane to expose the agent over A2A.
-- **Model card:** Foundry has no first-class model-card resource. `../agent/model_card.md` is referenced via a `modelCard` tag on the deployment.
+- **No Azure content filter on Claude:** Anthropic's classifiers run server-side — Anthropic deployments don't accept `raiPolicyName`. Route through Azure AI Content Safety separately if you need extra filtering before/after the model call.
+- **A2A auth:** the wrapper itself does no token validation; EasyAuth on the Container App ingress is the gate. Callers must present a bearer token whose audience is `api://$A2A_AAD_CLIENT_ID`.
+- **First apply timing:** `terraform apply` may sit on the Container App for a few minutes while the placeholder image starts and the revision goes healthy. Subsequent applies are quick.

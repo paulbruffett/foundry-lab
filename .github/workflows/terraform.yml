@@ -37,6 +37,9 @@ env:
   TF_VAR_model_provider_industry: ${{ vars.MODEL_PROVIDER_INDUSTRY || 'Education' }}
   TF_VAR_model_provider_organization_name: ${{ vars.MODEL_PROVIDER_ORGANIZATION_NAME || 'Home Use' }}
   TF_VAR_model_provider_country_code: ${{ vars.MODEL_PROVIDER_COUNTRY_CODE || 'US' }}
+  TF_VAR_a2a_resource_group_name: ${{ vars.A2A_RESOURCE_GROUP }}
+  TF_VAR_acr_name: ${{ vars.ACR_NAME }}
+  TF_VAR_a2a_aad_client_id: ${{ vars.A2A_AAD_CLIENT_ID }}
 
 jobs:
   terraform:
@@ -47,6 +50,10 @@ jobs:
     outputs:
       project_endpoint: ${{ steps.outputs.outputs.project_endpoint }}
       haiku_deployment_name: ${{ steps.outputs.outputs.haiku_deployment_name }}
+      acr_name: ${{ steps.outputs.outputs.acr_name }}
+      container_app_name: ${{ steps.outputs.outputs.container_app_name }}
+      a2a_resource_group: ${{ steps.outputs.outputs.a2a_resource_group }}
+      a2a_public_url: ${{ steps.outputs.outputs.a2a_public_url }}
 
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +94,10 @@ jobs:
         run: |
           echo "project_endpoint=$(terraform output -raw project_endpoint)" >> "$GITHUB_OUTPUT"
           echo "haiku_deployment_name=$(terraform output -raw haiku_deployment_name)" >> "$GITHUB_OUTPUT"
+          echo "acr_name=$(terraform output -raw acr_name)" >> "$GITHUB_OUTPUT"
+          echo "container_app_name=$(terraform output -raw container_app_name)" >> "$GITHUB_OUTPUT"
+          echo "a2a_resource_group=$(terraform output -raw a2a_resource_group)" >> "$GITHUB_OUTPUT"
+          echo "a2a_public_url=$(terraform output -raw a2a_public_url)" >> "$GITHUB_OUTPUT"
 
   agent:
     needs: terraform
@@ -113,3 +124,40 @@ jobs:
       - name: upsert test agent
         working-directory: agent
         run: python agent.py
+
+  a2a:
+    needs: [terraform, agent]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      ACR_NAME: ${{ needs.terraform.outputs.acr_name }}
+      CONTAINER_APP_NAME: ${{ needs.terraform.outputs.container_app_name }}
+      A2A_RG: ${{ needs.terraform.outputs.a2a_resource_group }}
+      A2A_PUBLIC_URL: ${{ needs.terraform.outputs.a2a_public_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+
+      - name: build and push image
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "foundry-lab/a2a-server:${{ github.sha }}" \
+            --image "foundry-lab/a2a-server:latest" \
+            ./agent
+
+      - name: roll container app
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$A2A_RG" \
+            --image "$ACR_NAME.azurecr.io/foundry-lab/a2a-server:${{ github.sha }}"
+
+      - name: print A2A registration info
+        run: |
+          echo "A2A endpoint:    $A2A_PUBLIC_URL"
+          echo "Discovery doc:   $A2A_PUBLIC_URL/.well-known/agent-card.json"
+          echo "Register the discovery URL in Foundry Control Plane → Connected agents."

@@ -14,18 +14,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
 
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
 from azure.identity import DefaultAzureCredential
 
 AGENT_NAME = "foundry-lab-test-agent"
-MODEL_CARD = Path(__file__).parent / "model_card.md"
 
 INSTRUCTIONS = """You are the Foundry Lab test agent.
-Answer concisely. If asked about your model or capabilities, point the user
-to the model card published alongside this agent."""
+Answer concisely."""
 
 
 def main() -> int:
@@ -34,9 +31,6 @@ def main() -> int:
 
     client = AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential())
 
-    # PromptAgentDefinition doesn't currently accept arbitrary metadata.
-    # Model-card pointer lives on the deployment as a tag (see main.tf);
-    # the A2A wrapper publishes the agent's discovery card separately.
     definition = PromptAgentDefinition(
         model=deployment,
         instructions=INSTRUCTIONS,

@@ -83,3 +83,24 @@ variable "tags" {
   }
   description = "Tags applied to managed resources."
 }
+
+variable "a2a_resource_group_name" {
+  type        = string
+  description = "Pre-existing resource group that holds the A2A wrapper (ACR + Container Apps). Created out-of-band like the TF state RG; SP needs Contributor on it."
+}
+
+variable "acr_name" {
+  type        = string
+  description = "Globally unique ACR name (alphanumeric, 5-50 chars) for the A2A wrapper image."
+}
+
+variable "container_app_name" {
+  type        = string
+  description = "Container App name for the A2A wrapper."
+  default     = "foundry-lab-a2a"
+}
+
+variable "a2a_aad_client_id" {
+  type        = string
+  description = "Entra app registration client ID used as the EasyAuth audience on the A2A Container App. Created out-of-band; see README."
+}
