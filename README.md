@@ -150,6 +150,16 @@ az role assignment create \
   --role "Azure AI Project Manager" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
 
+# Foundry RG — required to grant the A2A user-assigned identity the Azure AI
+# Project Manager role on the Foundry account at apply time. The "Azure AI
+# Project Manager" role above includes roleAssignments/write but with an ABAC
+# condition that blocks granting that very role to other principals.
+az role assignment create \
+  --assignee-object-id "$SP_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "User Access Administrator" \
+  --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
+
 # A2A RG — Contributor needed for Container Apps + ACR + Log Analytics
 A2A_RG="foundry-lab-a2a"
 az group create -n "$A2A_RG" -l "$LOCATION"
@@ -158,6 +168,15 @@ az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
   --role "Contributor" \
+  --scope "/subscriptions/$SUB_ID/resourceGroups/$A2A_RG"
+
+# A2A RG — required to grant the A2A user-assigned identity the AcrPull role
+# on the ACR at apply time. Contributor alone doesn't include
+# roleAssignments/write.
+az role assignment create \
+  --assignee-object-id "$SP_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "User Access Administrator" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$A2A_RG"
 ```
 
