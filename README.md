@@ -256,4 +256,4 @@ There is no clean Terraform/azapi resource for A2A registration today. After the
 - **Region:** Claude Haiku 4.5 only ships in `eastus2` and `swedencentral`. `variables.tf` enforces this.
 - **No Azure content filter on Claude:** Anthropic's classifiers run server-side — Anthropic deployments don't accept `raiPolicyName`. Route through Azure AI Content Safety separately if you need extra filtering before/after the model call.
 - **A2A auth:** the wrapper itself does no token validation; EasyAuth on the Container App ingress is the gate. Callers must present a bearer token whose audience is `api://$A2A_AAD_CLIENT_ID`.
-- **First apply timing:** `terraform apply` may sit on the Container App for a few minutes while the placeholder image starts and the revision goes healthy. Subsequent applies are quick.
+- **First apply timing:** `terraform apply` may sit on the Container App for a few minutes while the placeholder image starts and the revision goes healthy. Subsequent applies are fast.
