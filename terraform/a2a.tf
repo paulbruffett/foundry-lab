@@ -37,6 +37,23 @@ resource "azurerm_container_app_environment" "a2a" {
   tags = var.tags
 }
 
+# User-assigned identity for the Container App. Created and granted AcrPull
+# *before* the app itself, which breaks the chicken-and-egg you'd hit with a
+# system-assigned identity (Container Apps validates registry credentials at
+# create time and the SAI can't be granted AcrPull until the app exists).
+resource "azurerm_user_assigned_identity" "a2a" {
+  name                = "${var.container_app_name}-id"
+  resource_group_name = data.azurerm_resource_group.a2a.name
+  location            = data.azurerm_resource_group.a2a.location
+  tags                = var.tags
+}
+
+resource "azurerm_role_assignment" "a2a_acr_pull" {
+  scope                = azurerm_container_registry.a2a.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_user_assigned_identity.a2a.principal_id
+}
+
 resource "azurerm_container_app" "a2a" {
   name                         = var.container_app_name
   resource_group_name          = data.azurerm_resource_group.a2a.name
@@ -44,12 +61,13 @@ resource "azurerm_container_app" "a2a" {
   revision_mode                = "Single"
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.a2a.id]
   }
 
   registry {
     server   = azurerm_container_registry.a2a.login_server
-    identity = "System"
+    identity = azurerm_user_assigned_identity.a2a.id
   }
 
   ingress {
@@ -98,20 +116,15 @@ resource "azurerm_container_app" "a2a" {
       template[0].container[0].image,
     ]
   }
-}
 
-# Container App identity needs to pull from ACR.
-resource "azurerm_role_assignment" "a2a_acr_pull" {
-  scope                = azurerm_container_registry.a2a.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_container_app.a2a.identity[0].principal_id
+  depends_on = [azurerm_role_assignment.a2a_acr_pull]
 }
 
 # Container App identity calls the Foundry data plane the same way agent.py does.
 resource "azurerm_role_assignment" "a2a_foundry_data_plane" {
   scope                = data.azurerm_cognitive_account.foundry.id
   role_definition_name = "Azure AI Project Manager"
-  principal_id         = azurerm_container_app.a2a.identity[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.a2a.principal_id
 }
 
 # EasyAuth (Container Apps authConfig). azurerm doesn't model this resource;
