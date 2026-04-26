@@ -174,17 +174,29 @@ echo "A2A_AAD_CLIENT_ID = $A2A_APP_ID"
 
 Callers acquire a token for `api://$A2A_APP_ID` (e.g. `az account get-access-token --resource api://$A2A_APP_ID`) and pass it as `Authorization: Bearer <token>`. EasyAuth rejects unauthenticated requests with `401`.
 
-### 6. Sign the Anthropic Marketplace agreement
+### 6. Register Azure resource providers
+
+Fresh subscriptions don't have these registered, and Terraform 409s with `MissingSubscriptionRegistration` on the first apply.
+
+```bash
+for ns in Microsoft.App Microsoft.OperationalInsights Microsoft.ContainerRegistry Microsoft.CognitiveServices Microsoft.SaaS; do
+  az provider register --namespace "$ns"
+done
+
+# Poll until all show Registered before running terraform apply.
+for ns in Microsoft.App Microsoft.OperationalInsights Microsoft.ContainerRegistry Microsoft.CognitiveServices Microsoft.SaaS; do
+  until [ "$(az provider show -n "$ns" --query registrationState -o tsv)" = "Registered" ]; do sleep 10; done
+  echo "$ns registered"
+done
+```
+
+### 7. Sign the Anthropic Marketplace agreement
 
 Claude is delivered as a Models-from-Partners offer. The first deployment will fail until the agreement is accepted.
 
-```bash
-az provider register --namespace Microsoft.SaaS
-# Then in the Azure portal: Marketplace → search "Anthropic" → Subscribe.
-# This is a one-time, per-subscription action and cannot be done with `az` alone.
-```
+In the Azure portal: **Marketplace → search "Anthropic" → Subscribe**. One-time, per-subscription, and cannot be done with `az` alone.
 
-### 7. GitHub repo configuration
+### 8. GitHub repo configuration
 
 **Secrets** (repo Settings → Secrets and variables → Actions → Secrets):
 
