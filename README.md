@@ -8,11 +8,14 @@ backend.tf              azurerm remote state (Entra auth)
 variables.tf            inputs + region validation
 main.tf                 Foundry project + Claude Haiku deployment
 a2a.tf                  ACR + Container Apps + EasyAuth for the A2A wrapper
+observability.tf        App Insights + project connection for tracing
 outputs.tf              endpoints + IDs consumed by the agent + a2a steps
 terraform.tfvars.example
 ```
 
-## One-time bootstrap
+## Pre-terraform bootstrap
+
+Everything in this section must be in place before `terraform apply` will succeed. Post-terraform manual steps (token acquisition, Foundry Control Plane registration) live in a separate section below.
 
 You need: an Azure subscription (Enterprise or MCA-E for Claude), an existing Foundry account, the Anthropic Marketplace agreement signed, and an app registration for GitHub Actions to authenticate as.
 
@@ -191,7 +194,7 @@ az ad app update --id "$A2A_APP_ID" --identifier-uris "api://$A2A_APP_ID"
 echo "A2A_AAD_CLIENT_ID = $A2A_APP_ID"
 ```
 
-Callers acquire a token for `api://$A2A_APP_ID` (e.g. `az account get-access-token --resource api://$A2A_APP_ID`) and pass it as `Authorization: Bearer <token>`. EasyAuth rejects unauthenticated requests with `401`.
+EasyAuth rejects unauthenticated requests with `401`. The scope/preauthorization required for callers to actually mint tokens is set up after terraform — see the **Post-terraform setup** section below.
 
 ### 6. Register Azure resource providers
 
@@ -278,9 +281,81 @@ cd ../agent && pip install -r requirements.txt && python agent.py
 
 The Container App is created with a public placeholder image (`nginxinc/nginx-unprivileged:alpine`, chosen because it listens on 8080 to match ingress) and `lifecycle.ignore_changes` on the image field — first apply will succeed even though the wrapper isn't built yet, and CI takes over from there.
 
-## Registering the A2A endpoint with Foundry Control Plane
+## Post-terraform setup
 
-There is no clean Terraform/azapi resource for A2A registration today. After the `a2a` job logs the public URL, paste `${A2A_PUBLIC_URL}/.well-known/agent-card.json` into **Foundry Control Plane → Connected agents → Add A2A endpoint** in the portal.
+After `terraform apply` succeeds and the `a2a` CI job rolls the wrapper image into the Container App, the endpoint is live but gated by EasyAuth. These steps are manual one-time actions to make the endpoint callable and registered with Foundry.
+
+### 1. Expose an API scope and pre-authorize Azure CLI
+
+Without this, `az account get-access-token --resource api://$A2A_APP_ID` returns `AADSTS65001` because Azure CLI has nothing on the audience app reg to consent to.
+
+**Portal path** (recommended):
+
+1. **Microsoft Entra ID → App registrations → `foundry-lab-a2a` → Expose an API**
+2. Verify Application ID URI is `api://<A2A_APP_ID>` (already set in the bootstrap).
+3. Click **Add a scope**:
+   - Scope name: `user_impersonation`
+   - Who can consent: **Admins and users**
+   - Display names/descriptions: anything reasonable (e.g. "Access A2A")
+   - State: Enabled
+   - Save.
+4. Click **Add a client application**:
+   - Client ID: `04b07795-8ddb-461a-bbee-02f9e1bf7b46` (Microsoft Azure CLI's well-known appId)
+   - Check the `user_impersonation` scope
+   - Save.
+
+**CLI equivalent** (if you'd rather script it):
+
+```bash
+A2A_APP_ID=$(az ad app list --display-name "foundry-lab-a2a" --query "[0].appId" -o tsv)
+SCOPE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+AZ_CLI_APP_ID="04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+
+cat > /tmp/api.json <<EOF
+{
+  "oauth2PermissionScopes": [{
+    "id": "$SCOPE_ID",
+    "adminConsentDescription": "Access the A2A wrapper",
+    "adminConsentDisplayName": "Access A2A",
+    "userConsentDescription": "Access the A2A wrapper on your behalf",
+    "userConsentDisplayName": "Access A2A",
+    "value": "user_impersonation",
+    "type": "User",
+    "isEnabled": true
+  }],
+  "preAuthorizedApplications": [{
+    "appId": "$AZ_CLI_APP_ID",
+    "delegatedPermissionIds": ["$SCOPE_ID"]
+  }]
+}
+EOF
+
+OBJECT_ID=$(az ad app show --id "$A2A_APP_ID" --query id -o tsv)
+az rest --method PATCH \
+  --url "https://graph.microsoft.com/v1.0/applications/$OBJECT_ID" \
+  --headers "Content-Type=application/json" \
+  --body "{\"api\": $(cat /tmp/api.json)}"
+```
+
+### 2. Acquire a token and smoke-test the endpoint
+
+```bash
+A2A_APP_ID=$(az ad app list --display-name "foundry-lab-a2a" --query "[0].appId" -o tsv)
+A2A_FQDN=$(az containerapp show -n foundry-lab-a2a -g foundry-lab-a2a \
+  --query "properties.configuration.ingress.fqdn" -o tsv)
+TOKEN=$(az account get-access-token --resource "api://$A2A_APP_ID" --query accessToken -o tsv)
+
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "https://$A2A_FQDN/.well-known/agent-card.json" | jq .
+```
+
+If this returns the agent card JSON, EasyAuth and the wrapper are healthy. Tokens last ~1 hour.
+
+For Postman: Authorization tab → **Bearer Token** → paste the JWT → `GET https://<A2A_FQDN>/.well-known/agent-card.json`. The agent card response advertises the A2A protocol URLs to call next, with the same auth.
+
+### 3. Register the endpoint with Foundry Control Plane
+
+There is no clean Terraform/azapi resource for A2A registration today. Paste `https://<A2A_FQDN>/.well-known/agent-card.json` into **Foundry Control Plane → Connected agents → Add A2A endpoint** in the portal.
 
 ## Gotchas
 
