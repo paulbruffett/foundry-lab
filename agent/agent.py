@@ -17,6 +17,7 @@ import sys
 
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
+from azure.core.exceptions import HttpResponseError
 from azure.identity import DefaultAzureCredential
 
 AGENT_NAME = "foundry-lab-test-agent"
@@ -37,10 +38,20 @@ def main() -> int:
         tools=[],
     )
 
-    version = client.agents.create_version(
-        agent_name=AGENT_NAME,
-        definition=definition,
-    )
+    try:
+        version = client.agents.create_version(
+            agent_name=AGENT_NAME,
+            definition=definition,
+        )
+    except HttpResponseError as e:
+        print(f"create_version failed: status={e.status_code} reason={e.reason}", file=sys.stderr)
+        if e.response is not None:
+            try:
+                print(f"response body: {e.response.text()}", file=sys.stderr)
+            except Exception as body_err:
+                print(f"could not read response body: {body_err}", file=sys.stderr)
+            print(f"x-ms-request-id: {e.response.headers.get('x-ms-request-id')}", file=sys.stderr)
+        raise
 
     print(json.dumps({
         "agent_name": AGENT_NAME,
