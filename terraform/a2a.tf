@@ -106,6 +106,13 @@ resource "azurerm_container_app" "a2a" {
         name  = "A2A_PUBLIC_URL"
         value = "https://${var.container_app_name}.${azurerm_container_app_environment.a2a.default_domain}"
       }
+      # DefaultAzureCredential needs this hint to pick the user-assigned
+      # identity — without it ManagedIdentityCredential 400s with invalid_scope
+      # because the Container Apps MI endpoint can't infer which UAI to mint.
+      env {
+        name  = "AZURE_CLIENT_ID"
+        value = azurerm_user_assigned_identity.a2a.client_id
+      }
     }
   }
 
