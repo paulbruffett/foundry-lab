@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from azure.ai.projects import AIProjectClient
+from azure.ai.agents import AgentsClient
 from azure.identity import DefaultAzureCredential
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -27,17 +27,17 @@ from agent import AGENT_NAME
 
 app = FastAPI(title="foundry-lab-a2a")
 
-_client: AIProjectClient | None = None
+_agents: AgentsClient | None = None
 
 
-def _project() -> AIProjectClient:
-    global _client
-    if _client is None:
-        _client = AIProjectClient(
+def _agents_client() -> AgentsClient:
+    global _agents
+    if _agents is None:
+        _agents = AgentsClient(
             endpoint=os.environ["PROJECT_ENDPOINT"],
             credential=DefaultAzureCredential(),
         )
-    return _client
+    return _agents
 
 
 @app.get("/.well-known/agent-card.json")
@@ -74,7 +74,7 @@ class A2ARequest(BaseModel):
 
 @app.post("/a2a/messages")
 def a2a_messages(req: A2ARequest) -> dict[str, Any]:
-    client = _project()
+    client = _agents_client()
     user_text = next(
         (p.get("text", "") for m in req.messages if m.role == "user" for p in m.parts if p.get("type") == "text"),
         "",
@@ -82,14 +82,14 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
     if not user_text:
         raise HTTPException(400, "no user text part")
 
-    thread = client.agents.threads.create() if not req.threadId else client.agents.threads.get(req.threadId)
-    client.agents.messages.create(thread_id=thread.id, role="user", content=user_text)
-    run = client.agents.runs.create_and_process(thread_id=thread.id, agent_name=AGENT_NAME)
+    thread = client.threads.create() if not req.threadId else client.threads.get(req.threadId)
+    client.messages.create(thread_id=thread.id, role="user", content=user_text)
+    run = client.runs.create_and_process(thread_id=thread.id, agent_name=AGENT_NAME)
 
     if run.status != "completed":
         raise HTTPException(502, f"agent run failed: {run.status}")
 
-    msgs = list(client.agents.messages.list(thread_id=thread.id, order="desc", limit=1))
+    msgs = list(client.messages.list(thread_id=thread.id, order="desc", limit=1))
     reply = msgs[0].content[0].text.value if msgs else ""
 
     return {
