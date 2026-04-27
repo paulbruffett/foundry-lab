@@ -26,11 +26,40 @@ INSTRUCTIONS = """You are the Foundry Lab test agent.
 Answer concisely."""
 
 
+def _existing_version(client: AIProjectClient) -> object | None:
+    try:
+        return client.agents.get_version(agent_name=AGENT_NAME, version="latest")
+    except Exception as e:
+        print(f"could not fetch existing version, will attempt create: {e}", file=sys.stderr)
+        return None
+
+
+def _definition_unchanged(existing: object | None, deployment: str) -> bool:
+    if existing is None:
+        return False
+    defn = getattr(existing, "definition", existing)
+    return (
+        getattr(defn, "model", None) == deployment
+        and getattr(defn, "instructions", None) == INSTRUCTIONS
+        and not (getattr(defn, "tools", None) or [])
+    )
+
+
 def main() -> int:
     endpoint = os.environ["PROJECT_ENDPOINT"]
     deployment = os.environ["HAIKU_DEPLOYMENT_NAME"]
 
     client = AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential())
+
+    existing = _existing_version(client)
+    if _definition_unchanged(existing, deployment):
+        print(json.dumps({
+            "agent_name": AGENT_NAME,
+            "version": getattr(existing, "version", None),
+            "id": getattr(existing, "id", None),
+            "skipped": "definition unchanged",
+        }, indent=2))
+        return 0
 
     definition = PromptAgentDefinition(
         model=deployment,
