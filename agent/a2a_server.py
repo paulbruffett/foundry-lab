@@ -27,6 +27,27 @@ from agent import AGENT_NAME
 
 app = FastAPI(title="foundry-lab-a2a")
 
+# Telemetry. configure_azure_monitor() reads APPLICATIONINSIGHTS_CONNECTION_STRING
+# from the env (injected by Terraform from the project's App Insights connection).
+# AIAgentsInstrumentor adds spans for Foundry agent runs on top of the HTTP-level
+# spans FastAPIInstrumentor provides. Skipped when the connection string isn't
+# set so local `uvicorn` runs don't fail.
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    configure_azure_monitor()
+    FastAPIInstrumentor.instrument_app(app)
+
+    try:
+        from azure.ai.agents.telemetry import AIAgentsInstrumentor
+
+        AIAgentsInstrumentor().instrument()
+    except ImportError:
+        # Older azure-ai-agents builds don't ship the telemetry submodule;
+        # HTTP-level spans from FastAPIInstrumentor still go through.
+        pass
+
 _agents: AgentsClient | None = None
 
 

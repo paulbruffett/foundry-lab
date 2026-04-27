@@ -80,6 +80,11 @@ resource "azurerm_container_app" "a2a" {
     }
   }
 
+  secret {
+    name  = "appinsights-connection-string"
+    value = azurerm_application_insights.foundry.connection_string
+  }
+
   template {
     min_replicas = 0
     max_replicas = 1
@@ -112,6 +117,10 @@ resource "azurerm_container_app" "a2a" {
       env {
         name  = "AZURE_CLIENT_ID"
         value = azurerm_user_assigned_identity.a2a.client_id
+      }
+      env {
+        name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        secret_name = "appinsights-connection-string"
       }
     }
   }
