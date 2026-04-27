@@ -84,7 +84,7 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
 
     thread = client.threads.create() if not req.threadId else client.threads.get(req.threadId)
     client.messages.create(thread_id=thread.id, role="user", content=user_text)
-    run = client.runs.create_and_process(thread_id=thread.id, agent_name=AGENT_NAME)
+    run = client.runs.create_and_process(thread_id=thread.id, agent_id=AGENT_NAME)
 
     if run.status != "completed":
         raise HTTPException(502, f"agent run failed: {run.status}")
