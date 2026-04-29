@@ -1,29 +1,33 @@
-"""A2A wrapper around the Foundry test agent.
+"""A2A wrapper that proxies to Claude on Azure Foundry.
 
-Foundry Agent Service does NOT natively expose agents over A2A. To publish
-via A2A you stand up an A2A-compatible HTTP endpoint that proxies to the
-Foundry agent, then register that URL in Foundry Control Plane.
+Foundry's Agents/Assistants service (threads + runs + messages) only supports
+Azure-OpenAI backing models — Anthropic deployments are not invokable through
+that runtime and return `invalid_deployment` / `api_not_supported`. So this
+wrapper calls Foundry's native Anthropic Messages API directly at
+`/anthropic/v1/messages` with an Entra bearer token.
 
-This module exposes:
-  GET  /.well-known/agent-card.json   — A2A discovery document
-  POST /a2a/messages                   — A2A message endpoint (proxies to Foundry)
+The wrapper is stateless: A2A clients are expected to send full conversation
+history on each call. The optional `threadId` field is accepted for spec
+compatibility but ignored.
 
-Run locally:
-  PROJECT_ENDPOINT=... HAIKU_DEPLOYMENT_NAME=... \\
-    uvicorn a2a_server:app --host 0.0.0.0 --port 8080
+Required env vars:
+  PROJECT_ENDPOINT        — e.g. https://<resource>.services.ai.azure.com/api/projects/<proj>
+  HAIKU_DEPLOYMENT_NAME   — Anthropic deployment name in the Foundry account
 """
 
 from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlparse
 
-from azure.ai.agents import AgentsClient
-from azure.identity import DefaultAzureCredential
+import requests
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from agent import AGENT_NAME
+AGENT_NAME = "foundry-lab-test-agent"
+INSTRUCTIONS = "You are the Foundry Lab test agent.\nAnswer concisely."
 
 app = FastAPI(title="foundry-lab-a2a")
 
@@ -44,14 +48,6 @@ if _cs:
     FastAPIInstrumentor.instrument_app(app)
     print("[telemetry] configure_azure_monitor + FastAPIInstrumentor ok", flush=True)
 
-    try:
-        from azure.ai.agents.telemetry import AIAgentsInstrumentor
-
-        AIAgentsInstrumentor().instrument()
-        print("[telemetry] AIAgentsInstrumentor ok", flush=True)
-    except ImportError as e:
-        print(f"[telemetry] AIAgentsInstrumentor unavailable: {e}", flush=True)
-
     # Container Apps with min_replicas=0 SIGTERMs the container after idle. The
     # BatchSpanProcessor's default 5s flush interval can lose the last batch if
     # uvicorn doesn't drive OTel's atexit hook before the kill — force_flush in
@@ -63,44 +59,33 @@ if _cs:
             provider.force_flush(10_000)
             print("[telemetry] force_flush complete", flush=True)
 
-_agents: AgentsClient | None = None
-_agent_id_cache: str | None = None
+
+_token_provider = None
 
 
-def _agents_client() -> AgentsClient:
-    global _agents
-    if _agents is None:
-        _agents = AgentsClient(
-            endpoint=os.environ["PROJECT_ENDPOINT"],
-            credential=DefaultAzureCredential(),
+def _token() -> str:
+    global _token_provider
+    if _token_provider is None:
+        _token_provider = get_bearer_token_provider(
+            DefaultAzureCredential(),
+            "https://cognitiveservices.azure.com/.default",
         )
-    return _agents
+    return _token_provider()
 
 
-def _agent_id() -> str:
-    # Foundry's Assistants runtime requires the asst_* id, not the human name.
-    # agent.py creates the agent at deploy time; this lookup binds the wrapper
-    # to whichever id that produced.
-    global _agent_id_cache
-    if _agent_id_cache is None:
-        client = _agents_client()
-        match = next(
-            (a for a in client.list_agents() if getattr(a, "name", None) == AGENT_NAME),
-            None,
-        )
-        if match is None:
-            raise HTTPException(503, f"agent {AGENT_NAME!r} not found — run agent.py against this project")
-        _agent_id_cache = match.id
-    return _agent_id_cache
+def _anthropic_url() -> str:
+    # PROJECT_ENDPOINT is the project-scoped path; the Anthropic inference
+    # surface lives at the account host, not under /api/projects/<name>.
+    parsed = urlparse(os.environ["PROJECT_ENDPOINT"])
+    return f"{parsed.scheme}://{parsed.netloc}/anthropic/v1/messages"
 
 
 @app.get("/.well-known/agent-card.json")
 def agent_card() -> dict[str, Any]:
-    # A2A agent-card spec: https://a2a.googleapis.com / Microsoft A2A registration docs
     public_url = os.environ.get("A2A_PUBLIC_URL", "http://localhost:8080")
     return {
         "name": AGENT_NAME,
-        "description": "Foundry Lab test agent wrapped for A2A.",
+        "description": "Foundry Lab test agent (Claude Haiku 4.5 on Foundry).",
         "url": f"{public_url}/a2a/messages",
         "version": "0.1.0",
         "protocols": ["a2a/v1"],
@@ -126,27 +111,50 @@ class A2ARequest(BaseModel):
     threadId: str | None = None
 
 
+def _to_anthropic_messages(messages: list[A2AMessage]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        text = "".join(p.get("text", "") for p in m.parts if p.get("type") == "text")
+        if not text:
+            continue
+        role = "user" if m.role == "user" else "assistant"
+        out.append({"role": role, "content": text})
+    return out
+
+
 @app.post("/a2a/messages")
 def a2a_messages(req: A2ARequest) -> dict[str, Any]:
-    client = _agents_client()
-    user_text = next(
-        (p.get("text", "") for m in req.messages if m.role == "user" for p in m.parts if p.get("type") == "text"),
-        "",
+    anth_messages = _to_anthropic_messages(req.messages)
+    if not anth_messages:
+        raise HTTPException(400, "no text content in messages")
+    if anth_messages[0]["role"] != "user":
+        raise HTTPException(400, "first message must be from the user")
+
+    payload = {
+        "model": os.environ["HAIKU_DEPLOYMENT_NAME"],
+        "max_tokens": 4096,
+        "system": INSTRUCTIONS,
+        "messages": anth_messages,
+    }
+
+    r = requests.post(
+        _anthropic_url(),
+        headers={
+            "Authorization": f"Bearer {_token()}",
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        },
+        json=payload,
+        timeout=60,
     )
-    if not user_text:
-        raise HTTPException(400, "no user text part")
+    if not r.ok:
+        print(f"[anthropic] HTTP {r.status_code}: {r.text[:500]}", flush=True)
+        raise HTTPException(502, f"upstream error: HTTP {r.status_code}: {r.text[:500]}")
 
-    thread = client.threads.create() if not req.threadId else client.threads.get(req.threadId)
-    client.messages.create(thread_id=thread.id, role="user", content=user_text)
-    run = client.runs.create_and_process(thread_id=thread.id, agent_id=_agent_id())
-
-    if run.status != "completed":
-        raise HTTPException(502, f"agent run failed: {run.status}")
-
-    msgs = list(client.messages.list(thread_id=thread.id, order="desc", limit=1))
-    reply = msgs[0].content[0].text.value if msgs else ""
+    data = r.json()
+    reply = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
 
     return {
-        "threadId": thread.id,
+        "threadId": req.threadId,
         "messages": [{"role": "assistant", "parts": [{"type": "text", "text": reply}]}],
     }

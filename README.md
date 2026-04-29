@@ -1,6 +1,6 @@
 # Terraform — Foundry Lab
 
-Manages an Azure AI Foundry **project** + **Claude Haiku 4.5 deployment** under a pre-existing Foundry account (Microsoft.CognitiveServices, kind = `AIServices`), plus the **A2A wrapper** (Container Apps + ACR) that publishes the agent for cross-platform consumption. Agents themselves are created out-of-band by `../agent/agent.py` because they're a Foundry data-plane construct, not an ARM resource.
+Manages an Azure AI Foundry **project** + **Claude Haiku 4.5 deployment** under a pre-existing Foundry account (Microsoft.CognitiveServices, kind = `AIServices`), plus the **A2A wrapper** (Container Apps + ACR) that publishes the agent for cross-platform consumption. The wrapper calls Foundry's native Anthropic Messages API directly — Foundry's Agents/Assistants service doesn't support Anthropic backing models, so there is no Foundry-side agent to upsert.
 
 ```
 providers.tf            azapi + azurerm provider pinning
@@ -146,7 +146,9 @@ az role assignment create \
   --role "Cognitive Services Contributor" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
 
-# Foundry data plane — required for agent.py to upsert the agent
+# Foundry data plane — Terraform needs to hold this role to grant it to the
+# A2A user-assigned identity at apply time (ABAC on Azure AI Project Manager
+# blocks granting roles you don't yourself hold).
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
@@ -261,23 +263,16 @@ terraform plan
 terraform apply
 ```
 
-After `apply` succeeds, run the data-plane agent upsert:
-
-```bash
-export PROJECT_ENDPOINT=$(terraform output -raw project_endpoint)
-export HAIKU_DEPLOYMENT_NAME=$(terraform output -raw haiku_deployment_name)
-cd ../agent && pip install -r requirements.txt && python agent.py
-```
+After `apply` succeeds, the wrapper image still has to be built and rolled (CI does this on push to `main`; locally, mirror the `a2a` job below).
 
 ## CI behavior
 
 `.github/workflows/terraform.yml` runs on every push and PR touching `terraform/`, `agent/`, or the workflow itself:
 
 - PRs → `terraform plan` only.
-- Push to `main` → three sequential jobs:
+- Push to `main` → two sequential jobs:
   1. **terraform** — `plan` + `apply` (Foundry project, Haiku deployment, ACR, Container Apps env, Container App, EasyAuth).
-  2. **agent** — `agent.py` upserts the Foundry test agent against the freshly-applied project.
-  3. **a2a** — `az acr build` builds the wrapper image from `../agent/Dockerfile`, pushes to ACR, then `az containerapp update --image` rolls the Container App. The job logs the public URL and the discovery-document path you paste into Foundry Control Plane.
+  2. **a2a** — `az acr build` builds the wrapper image from `../agent/Dockerfile`, pushes to ACR, then `az containerapp update --image` rolls the Container App. The job logs the public URL and the discovery-document path you paste into Foundry Control Plane.
 
 The Container App is created with a public placeholder image (`nginxinc/nginx-unprivileged:alpine`, chosen because it listens on 8080 to match ingress) and `lifecycle.ignore_changes` on the image field — first apply will succeed even though the wrapper isn't built yet, and CI takes over from there.
 
