@@ -64,6 +64,7 @@ if _cs:
             print("[telemetry] force_flush complete", flush=True)
 
 _agents: AgentsClient | None = None
+_agent_id_cache: str | None = None
 
 
 def _agents_client() -> AgentsClient:
@@ -74,6 +75,23 @@ def _agents_client() -> AgentsClient:
             credential=DefaultAzureCredential(),
         )
     return _agents
+
+
+def _agent_id() -> str:
+    # Foundry's Assistants runtime requires the asst_* id, not the human name.
+    # agent.py creates the agent at deploy time; this lookup binds the wrapper
+    # to whichever id that produced.
+    global _agent_id_cache
+    if _agent_id_cache is None:
+        client = _agents_client()
+        match = next(
+            (a for a in client.list_agents() if getattr(a, "name", None) == AGENT_NAME),
+            None,
+        )
+        if match is None:
+            raise HTTPException(503, f"agent {AGENT_NAME!r} not found — run agent.py against this project")
+        _agent_id_cache = match.id
+    return _agent_id_cache
 
 
 @app.get("/.well-known/agent-card.json")
@@ -120,7 +138,7 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
 
     thread = client.threads.create() if not req.threadId else client.threads.get(req.threadId)
     client.messages.create(thread_id=thread.id, role="user", content=user_text)
-    run = client.runs.create_and_process(thread_id=thread.id, agent_id=AGENT_NAME)
+    run = client.runs.create_and_process(thread_id=thread.id, agent_id=_agent_id())
 
     if run.status != "completed":
         raise HTTPException(502, f"agent run failed: {run.status}")
