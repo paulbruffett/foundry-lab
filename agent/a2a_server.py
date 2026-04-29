@@ -29,24 +29,39 @@ app = FastAPI(title="foundry-lab-a2a")
 
 # Telemetry. configure_azure_monitor() reads APPLICATIONINSIGHTS_CONNECTION_STRING
 # from the env (injected by Terraform from the project's App Insights connection).
-# AIAgentsInstrumentor adds spans for Foundry agent runs on top of the HTTP-level
-# spans FastAPIInstrumentor provides. Skipped when the connection string isn't
-# set so local `uvicorn` runs don't fail.
-if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+# Each step prints a [telemetry] line at startup so Container Apps console logs
+# show exactly which path ran — silent no-ops here previously masked which of
+# {env-missing, import-failure, exporter-init} was the actual fault.
+_cs = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
+print(f"[telemetry] APPLICATIONINSIGHTS_CONNECTION_STRING len={len(_cs)}", flush=True)
+
+if _cs:
     from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry import trace
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
     configure_azure_monitor()
     FastAPIInstrumentor.instrument_app(app)
+    print("[telemetry] configure_azure_monitor + FastAPIInstrumentor ok", flush=True)
 
     try:
         from azure.ai.agents.telemetry import AIAgentsInstrumentor
 
         AIAgentsInstrumentor().instrument()
-    except ImportError:
-        # Older azure-ai-agents builds don't ship the telemetry submodule;
-        # HTTP-level spans from FastAPIInstrumentor still go through.
-        pass
+        print("[telemetry] AIAgentsInstrumentor ok", flush=True)
+    except ImportError as e:
+        print(f"[telemetry] AIAgentsInstrumentor unavailable: {e}", flush=True)
+
+    # Container Apps with min_replicas=0 SIGTERMs the container after idle. The
+    # BatchSpanProcessor's default 5s flush interval can lose the last batch if
+    # uvicorn doesn't drive OTel's atexit hook before the kill — force_flush in
+    # the lifespan shutdown closes that gap.
+    @app.on_event("shutdown")
+    def _flush_telemetry() -> None:
+        provider = trace.get_tracer_provider()
+        if hasattr(provider, "force_flush"):
+            provider.force_flush(10_000)
+            print("[telemetry] force_flush complete", flush=True)
 
 _agents: AgentsClient | None = None
 
