@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-COPY agent.py a2a_server.py ./
+COPY a2a_server.py ./
 
 EXPOSE 8080
 
