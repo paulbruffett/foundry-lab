@@ -17,6 +17,7 @@ Required env vars:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -29,24 +30,30 @@ from pydantic import BaseModel
 AGENT_NAME = "foundry-lab-test-agent"
 INSTRUCTIONS = "You are the Foundry Lab test agent.\nAnswer concisely."
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("foundry-lab-a2a")
+logger.setLevel(logging.INFO)
+
 app = FastAPI(title="foundry-lab-a2a")
 
 # Telemetry. configure_azure_monitor() reads APPLICATIONINSIGHTS_CONNECTION_STRING
-# from the env (injected by Terraform from the project's App Insights connection).
-# Each step prints a [telemetry] line at startup so Container Apps console logs
-# show exactly which path ran — silent no-ops here previously masked which of
-# {env-missing, import-failure, exporter-init} was the actual fault.
+# from the env (injected by Terraform from the project's App Insights connection)
+# and wires Python's logging module into the OTel logs exporter, so logger.info /
+# logger.exception land in App Insights `traces` and `exceptions`. Plain print()
+# does NOT — keep diagnostic output going through logger.
 _cs = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
-print(f"[telemetry] APPLICATIONINSIGHTS_CONNECTION_STRING len={len(_cs)}", flush=True)
+logger.info("telemetry connection string len=%d", len(_cs))
 
 if _cs:
     from azure.monitor.opentelemetry import configure_azure_monitor
     from opentelemetry import trace
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
-    configure_azure_monitor()
+    configure_azure_monitor(logger_name="foundry-lab-a2a")
     FastAPIInstrumentor.instrument_app(app)
-    print("[telemetry] configure_azure_monitor + FastAPIInstrumentor ok", flush=True)
+    RequestsInstrumentor().instrument()
+    logger.info("telemetry configured: azure_monitor + fastapi + requests")
 
     # Container Apps with min_replicas=0 SIGTERMs the container after idle. The
     # BatchSpanProcessor's default 5s flush interval can lose the last batch if
@@ -57,7 +64,7 @@ if _cs:
         provider = trace.get_tracer_provider()
         if hasattr(provider, "force_flush"):
             provider.force_flush(10_000)
-            print("[telemetry] force_flush complete", flush=True)
+            logger.info("telemetry force_flush complete")
 
 
 _token_provider = None
@@ -124,37 +131,56 @@ def _to_anthropic_messages(messages: list[A2AMessage]) -> list[dict[str, Any]]:
 
 @app.post("/a2a/messages")
 def a2a_messages(req: A2ARequest) -> dict[str, Any]:
-    anth_messages = _to_anthropic_messages(req.messages)
-    if not anth_messages:
-        raise HTTPException(400, "no text content in messages")
-    if anth_messages[0]["role"] != "user":
-        raise HTTPException(400, "first message must be from the user")
+    try:
+        anth_messages = _to_anthropic_messages(req.messages)
+        if not anth_messages:
+            raise HTTPException(400, "no text content in messages")
+        if anth_messages[0]["role"] != "user":
+            raise HTTPException(400, "first message must be from the user")
 
-    payload = {
-        "model": os.environ["HAIKU_DEPLOYMENT_NAME"],
-        "max_tokens": 4096,
-        "system": INSTRUCTIONS,
-        "messages": anth_messages,
-    }
+        # Surface missing config as 500 with a clear log entry, not a bare KeyError.
+        deployment = os.environ.get("HAIKU_DEPLOYMENT_NAME")
+        if not deployment:
+            logger.error("HAIKU_DEPLOYMENT_NAME env var is not set")
+            raise HTTPException(500, "HAIKU_DEPLOYMENT_NAME not configured")
+        if not os.environ.get("PROJECT_ENDPOINT"):
+            logger.error("PROJECT_ENDPOINT env var is not set")
+            raise HTTPException(500, "PROJECT_ENDPOINT not configured")
 
-    r = requests.post(
-        _anthropic_url(),
-        headers={
-            "Authorization": f"Bearer {_token()}",
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-        },
-        json=payload,
-        timeout=60,
-    )
-    if not r.ok:
-        print(f"[anthropic] HTTP {r.status_code}: {r.text[:500]}", flush=True)
-        raise HTTPException(502, f"upstream error: HTTP {r.status_code}: {r.text[:500]}")
+        url = _anthropic_url()
+        logger.info("a2a request: messages=%d url=%s deployment=%s", len(anth_messages), url, deployment)
 
-    data = r.json()
-    reply = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        payload = {
+            "model": deployment,
+            "max_tokens": 4096,
+            "system": INSTRUCTIONS,
+            "messages": anth_messages,
+        }
 
-    return {
-        "threadId": req.threadId,
-        "messages": [{"role": "assistant", "parts": [{"type": "text", "text": reply}]}],
-    }
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {_token()}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            },
+            json=payload,
+            timeout=60,
+        )
+        if not r.ok:
+            logger.error("anthropic upstream error status=%d body=%s", r.status_code, r.text[:500])
+            raise HTTPException(502, f"upstream error: HTTP {r.status_code}: {r.text[:500]}")
+
+        data = r.json()
+        reply = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        logger.info("a2a reply len=%d", len(reply))
+
+        return {
+            "threadId": req.threadId,
+            "messages": [{"role": "assistant", "parts": [{"type": "text", "text": reply}]}],
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("unhandled exception in /a2a/messages")
+        raise HTTPException(500, "internal error — see App Insights exceptions")
