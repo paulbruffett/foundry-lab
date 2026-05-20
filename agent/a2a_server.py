@@ -4,10 +4,11 @@ Foundry's Agents/Assistants service (threads + runs + messages) only supports
 Azure-OpenAI backing models — Anthropic deployments are not invokable through
 that runtime and return `invalid_deployment` / `api_not_supported`. So this
 wrapper calls Foundry's native Anthropic Messages pass-through directly at
-`{PROJECT_ENDPOINT}/anthropic/v1/messages?api-version=...` with an Entra
-bearer token. Both the project path and api-version are required — the
-account-scoped variant (host-only, no project path) accepted connections
-but hung for 60s with no response.
+`https://<account>.services.ai.azure.com/anthropic/v1/messages` (account-
+scoped, no api-version — Foundry versions this route via the path's /v1/).
+Token audience must be `https://ai.azure.com`; the more common
+`https://cognitiveservices.azure.com` audience causes Foundry to silently
+drop the request (manifests as a 60s read timeout, not a 401).
 
 The wrapper is stateless: A2A clients are expected to send full conversation
 history on each call. The optional `threadId` field is accepted for spec
@@ -86,17 +87,18 @@ def _token() -> str:
     return _token_provider()
 
 
-FOUNDRY_API_VERSION = "2024-10-21"
-
-
 def _anthropic_url() -> str:
-    # Project-scoped pass-through: {PROJECT_ENDPOINT}/anthropic/v1/messages.
-    # The account-scoped variant (host only, stripping /api/projects/<name>)
-    # accepted connections but hung for 60s with no response — Foundry's
-    # preview data plane appears to require both the project path and an
-    # explicit api-version to resolve a backend.
-    base = os.environ["PROJECT_ENDPOINT"].rstrip("/")
-    return f"{base}/anthropic/v1/messages?api-version={FOUNDRY_API_VERSION}"
+    # Account-scoped pass-through; the project-scoped variant rejects every
+    # api-version we tried (project + no version = "Missing api-version",
+    # project + any value = "API version not supported" or 404). The account
+    # host with no api-version returns 200 — Foundry versions this route via
+    # the /v1/ in the path, not via an Azure-style api-version query.
+    # The earlier 60s hang on this same URL was caused by the token audience
+    # being https://cognitiveservices.azure.com instead of https://ai.azure.com;
+    # Foundry silently drops the request when the audience is wrong rather
+    # than returning 401.
+    parsed = urlparse(os.environ["PROJECT_ENDPOINT"])
+    return f"{parsed.scheme}://{parsed.netloc}/anthropic/v1/messages"
 
 
 @app.get("/.well-known/agent-card.json")
