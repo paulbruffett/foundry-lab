@@ -139,7 +139,7 @@ resource "azurerm_container_app" "a2a" {
 # Container App identity calls the Foundry data plane the same way agent.py does.
 resource "azurerm_role_assignment" "a2a_foundry_data_plane" {
   scope                = data.azurerm_cognitive_account.foundry.id
-  role_definition_name = "Azure AI Project Manager"
+  role_definition_name = "Azure AI Developer"
   principal_id         = azurerm_user_assigned_identity.a2a.principal_id
 }
 

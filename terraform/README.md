@@ -148,19 +148,8 @@ az role assignment create \
   --role "Cognitive Services Contributor" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
 
-# Foundry data plane — Terraform needs to hold this role to grant it to the
-# A2A user-assigned identity at apply time (ABAC on Azure AI Project Manager
-# blocks granting roles you don't yourself hold).
-az role assignment create \
-  --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Azure AI Project Manager" \
-  --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
-
-# Foundry RG — required to grant the A2A user-assigned identity the Azure AI
-# Project Manager role on the Foundry account at apply time. The "Azure AI
-# Project Manager" role above includes roleAssignments/write but with an ABAC
-# condition that blocks granting that very role to other principals.
+# Foundry RG — required so Terraform can grant the A2A user-assigned identity
+# the "Azure AI Developer" role on the Foundry account at apply time.
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
