@@ -155,7 +155,7 @@ az role assignment create \
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" \
+  --role "Azire AI Developer" \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
 
 # A2A RG — Contributor needed for Container Apps + ACR + Log Analytics
