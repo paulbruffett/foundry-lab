@@ -31,6 +31,8 @@ import anthropic
 from anthropic import AnthropicFoundry
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from fastapi import FastAPI, HTTPException
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 
 AGENT_NAME = "foundry-lab-test-agent"
@@ -39,6 +41,10 @@ INSTRUCTIONS = "You are the Foundry Lab test agent.\nAnswer concisely."
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("foundry-lab-a2a")
 logger.setLevel(logging.INFO)
+
+# get_tracer returns a proxy; spans created later route to whichever provider
+# configure_azure_monitor installs (or a no-op provider if telemetry is off).
+_tracer = trace.get_tracer("foundry-lab-a2a")
 
 app = FastAPI(title="foundry-lab-a2a")
 
@@ -52,7 +58,6 @@ logger.info("telemetry connection string len=%d", len(_cs))
 
 if _cs:
     from azure.monitor.opentelemetry import configure_azure_monitor
-    from opentelemetry import trace
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
@@ -159,18 +164,44 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
 
         logger.info("a2a request: messages=%d deployment=%s", len(anth_messages), deployment)
 
-        try:
-            message = _client().messages.create(
-                model=deployment,
-                max_tokens=4096,
-                system=INSTRUCTIONS,
-                messages=anth_messages,
+        # OTel GenAI semantic-convention span — Foundry's Tracing tab keys off
+        # `gen_ai.*` attributes to render this as an LLM call rather than a
+        # generic HTTP dependency. Span name is `{op} {model}` per the spec.
+        with _tracer.start_as_current_span(
+            f"chat {deployment}",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.system": "anthropic",
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": deployment,
+                "gen_ai.request.max_tokens": 4096,
+                "gen_ai.request.messages.count": len(anth_messages),
+            },
+        ) as span:
+            try:
+                message = _client().messages.create(
+                    model=deployment,
+                    max_tokens=4096,
+                    system=INSTRUCTIONS,
+                    messages=anth_messages,
+                )
+            except anthropic.APIStatusError as e:
+                span.set_status(Status(StatusCode.ERROR, f"HTTP {e.status_code}"))
+                span.record_exception(e)
+                body = getattr(e, "response", None)
+                body_text = body.text[:500] if body is not None else ""
+                logger.error("anthropic upstream error status=%d body=%s", e.status_code, body_text)
+                raise HTTPException(502, f"upstream error: HTTP {e.status_code}: {body_text}") from e
+
+            span.set_attributes(
+                {
+                    "gen_ai.response.id": message.id,
+                    "gen_ai.response.model": message.model,
+                    "gen_ai.response.finish_reasons": [message.stop_reason] if message.stop_reason else [],
+                    "gen_ai.usage.input_tokens": message.usage.input_tokens,
+                    "gen_ai.usage.output_tokens": message.usage.output_tokens,
+                }
             )
-        except anthropic.APIStatusError as e:
-            body = getattr(e, "response", None)
-            body_text = body.text[:500] if body is not None else ""
-            logger.error("anthropic upstream error status=%d body=%s", e.status_code, body_text)
-            raise HTTPException(502, f"upstream error: HTTP {e.status_code}: {body_text}") from e
 
         reply = "".join(b.text for b in message.content if b.type == "text")
         logger.info("a2a reply len=%d", len(reply))
