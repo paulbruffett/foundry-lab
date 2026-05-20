@@ -3,8 +3,11 @@
 Foundry's Agents/Assistants service (threads + runs + messages) only supports
 Azure-OpenAI backing models — Anthropic deployments are not invokable through
 that runtime and return `invalid_deployment` / `api_not_supported`. So this
-wrapper calls Foundry's native Anthropic Messages API directly at
-`/anthropic/v1/messages` with an Entra bearer token.
+wrapper calls Foundry's native Anthropic Messages pass-through directly at
+`{PROJECT_ENDPOINT}/anthropic/v1/messages?api-version=...` with an Entra
+bearer token. Both the project path and api-version are required — the
+account-scoped variant (host-only, no project path) accepted connections
+but hung for 60s with no response.
 
 The wrapper is stateless: A2A clients are expected to send full conversation
 history on each call. The optional `threadId` field is accepted for spec
@@ -80,11 +83,17 @@ def _token() -> str:
     return _token_provider()
 
 
+FOUNDRY_API_VERSION = "2024-10-21"
+
+
 def _anthropic_url() -> str:
-    # PROJECT_ENDPOINT is the project-scoped path; the Anthropic inference
-    # surface lives at the account host, not under /api/projects/<name>.
-    parsed = urlparse(os.environ["PROJECT_ENDPOINT"])
-    return f"{parsed.scheme}://{parsed.netloc}/anthropic/v1/messages"
+    # Project-scoped pass-through: {PROJECT_ENDPOINT}/anthropic/v1/messages.
+    # The account-scoped variant (host only, stripping /api/projects/<name>)
+    # accepted connections but hung for 60s with no response — Foundry's
+    # preview data plane appears to require both the project path and an
+    # explicit api-version to resolve a backend.
+    base = os.environ["PROJECT_ENDPOINT"].rstrip("/")
+    return f"{base}/anthropic/v1/messages?api-version={FOUNDRY_API_VERSION}"
 
 
 @app.get("/.well-known/agent-card.json")
@@ -165,7 +174,7 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
                 "anthropic-version": "2023-06-01",
             },
             json=payload,
-            timeout=60,
+            timeout=15,
         )
         if not r.ok:
             logger.error("anthropic upstream error status=%d body=%s", r.status_code, r.text[:500])
