@@ -3,12 +3,12 @@
 Foundry's Agents/Assistants service (threads + runs + messages) only supports
 Azure-OpenAI backing models — Anthropic deployments are not invokable through
 that runtime and return `invalid_deployment` / `api_not_supported`. So this
-wrapper calls Foundry's native Anthropic Messages pass-through directly at
-`https://<account>.services.ai.azure.com/anthropic/v1/messages` (account-
-scoped, no api-version — Foundry versions this route via the path's /v1/).
-Token audience must be `https://ai.azure.com`; the more common
-`https://cognitiveservices.azure.com` audience causes Foundry to silently
-drop the request (manifests as a 60s read timeout, not a 401).
+wrapper calls Foundry's native Anthropic Messages pass-through via the
+`AnthropicFoundry` SDK client, pointed at
+`https://<account>.services.ai.azure.com/anthropic` (account-scoped; the SDK
+appends `/v1/messages`). Token audience must be `https://ai.azure.com`; the
+more common `https://cognitiveservices.azure.com` audience causes Foundry to
+silently drop the request (manifests as a 60s read timeout, not a 401).
 
 The wrapper is stateless: A2A clients are expected to send full conversation
 history on each call. The optional `threadId` field is accepted for spec
@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
+import anthropic
+from anthropic import AnthropicFoundry
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -52,12 +54,14 @@ if _cs:
     from azure.monitor.opentelemetry import configure_azure_monitor
     from opentelemetry import trace
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-    from opentelemetry.instrumentation.requests import RequestsInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
     configure_azure_monitor(logger_name="foundry-lab-a2a")
     FastAPIInstrumentor.instrument_app(app)
-    RequestsInstrumentor().instrument()
-    logger.info("telemetry configured: azure_monitor + fastapi + requests")
+    # The Anthropic SDK uses httpx internally; instrumenting it keeps the
+    # upstream Foundry call visible as a dependency span in App Insights.
+    HTTPXClientInstrumentor().instrument()
+    logger.info("telemetry configured: azure_monitor + fastapi + httpx")
 
     # Container Apps with min_replicas=0 SIGTERMs the container after idle. The
     # BatchSpanProcessor's default 5s flush interval can lose the last batch if
@@ -71,34 +75,26 @@ if _cs:
             logger.info("telemetry force_flush complete")
 
 
-_token_provider = None
-
-
-def _token() -> str:
-    # Foundry's Anthropic pass-through validates audience == https://ai.azure.com.
-    # The cognitiveservices.azure.com scope (which works for Azure-OpenAI on
-    # Foundry) is rejected here with "audience is incorrect (https://ai.azure.com)".
-    global _token_provider
-    if _token_provider is None:
-        _token_provider = get_bearer_token_provider(
-            DefaultAzureCredential(),
-            "https://ai.azure.com/.default",
-        )
-    return _token_provider()
-
-
-def _anthropic_url() -> str:
+@lru_cache(maxsize=1)
+def _client() -> AnthropicFoundry:
     # Account-scoped pass-through; the project-scoped variant rejects every
-    # api-version we tried (project + no version = "Missing api-version",
-    # project + any value = "API version not supported" or 404). The account
-    # host with no api-version returns 200 — Foundry versions this route via
-    # the /v1/ in the path, not via an Azure-style api-version query.
-    # The earlier 60s hang on this same URL was caused by the token audience
-    # being https://cognitiveservices.azure.com instead of https://ai.azure.com;
+    # api-version we tried. The SDK targets `<base_url>/v1/messages`, so
+    # base_url ends at `/anthropic`.
+    # The earlier 60s hang on this URL was caused by the token audience being
+    # https://cognitiveservices.azure.com instead of https://ai.azure.com;
     # Foundry silently drops the request when the audience is wrong rather
     # than returning 401.
     parsed = urlparse(os.environ["PROJECT_ENDPOINT"])
-    return f"{parsed.scheme}://{parsed.netloc}/anthropic/v1/messages"
+    base_url = f"{parsed.scheme}://{parsed.netloc}/anthropic"
+    token_provider = get_bearer_token_provider(
+        DefaultAzureCredential(),
+        "https://ai.azure.com/.default",
+    )
+    return AnthropicFoundry(
+        azure_ad_token_provider=token_provider,
+        base_url=base_url,
+        timeout=15.0,
+    )
 
 
 @app.get("/.well-known/agent-card.json")
@@ -161,32 +157,22 @@ def a2a_messages(req: A2ARequest) -> dict[str, Any]:
             logger.error("PROJECT_ENDPOINT env var is not set")
             raise HTTPException(500, "PROJECT_ENDPOINT not configured")
 
-        url = _anthropic_url()
-        logger.info("a2a request: messages=%d url=%s deployment=%s", len(anth_messages), url, deployment)
+        logger.info("a2a request: messages=%d deployment=%s", len(anth_messages), deployment)
 
-        payload = {
-            "model": deployment,
-            "max_tokens": 4096,
-            "system": INSTRUCTIONS,
-            "messages": anth_messages,
-        }
+        try:
+            message = _client().messages.create(
+                model=deployment,
+                max_tokens=4096,
+                system=INSTRUCTIONS,
+                messages=anth_messages,
+            )
+        except anthropic.APIStatusError as e:
+            body = getattr(e, "response", None)
+            body_text = body.text[:500] if body is not None else ""
+            logger.error("anthropic upstream error status=%d body=%s", e.status_code, body_text)
+            raise HTTPException(502, f"upstream error: HTTP {e.status_code}: {body_text}") from e
 
-        r = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {_token()}",
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-            },
-            json=payload,
-            timeout=15,
-        )
-        if not r.ok:
-            logger.error("anthropic upstream error status=%d body=%s", r.status_code, r.text[:500])
-            raise HTTPException(502, f"upstream error: HTTP {r.status_code}: {r.text[:500]}")
-
-        data = r.json()
-        reply = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        reply = "".join(b.text for b in message.content if b.type == "text")
         logger.info("a2a reply len=%d", len(reply))
 
         return {
