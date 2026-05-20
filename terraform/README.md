@@ -149,7 +149,9 @@ az role assignment create \
   --scope "/subscriptions/$SUB_ID/resourceGroups/$FOUNDRY_RG"
 
 # Foundry RG — required so Terraform can grant the A2A user-assigned identity
-# the "Azure AI Developer" role on the Foundry account at apply time.
+# the "Cognitive Services User" role on the Foundry account at apply time.
+# (Azure AI Developer was tried first but lacks AIServices/* data actions
+# needed for the Anthropic pass-through; see agent/a2a_server.py docstring.)
 az role assignment create \
   --assignee-object-id "$SP_OBJECT_ID" \
   --assignee-principal-type ServicePrincipal \

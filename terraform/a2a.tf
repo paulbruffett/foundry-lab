@@ -136,10 +136,16 @@ resource "azurerm_container_app" "a2a" {
   depends_on = [azurerm_role_assignment.a2a_acr_pull]
 }
 
-# Container App identity calls the Foundry data plane the same way agent.py does.
+# Container App identity calls the Foundry data plane to invoke Claude via the
+# Anthropic pass-through. Role must include the `Microsoft.CognitiveServices/
+# accounts/AIServices/providers/action` data action — `Azure AI Developer`
+# only covers OpenAI/SpeechServices/ContentSafety/MaaS data actions and gets
+# rejected by /anthropic/v1/* with PermissionDenied. `Cognitive Services User`
+# carries the broader `Microsoft.CognitiveServices/*` wildcard, which is the
+# minimum built-in role that grants access to the AIServices scope.
 resource "azurerm_role_assignment" "a2a_foundry_data_plane" {
   scope                = data.azurerm_cognitive_account.foundry.id
-  role_definition_name = "Azure AI Developer"
+  role_definition_name = "Cognitive Services User"
   principal_id         = azurerm_user_assigned_identity.a2a.principal_id
 }
 
