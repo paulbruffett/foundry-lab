@@ -74,11 +74,14 @@ _token_provider = None
 
 
 def _token() -> str:
+    # Foundry's Anthropic pass-through validates audience == https://ai.azure.com.
+    # The cognitiveservices.azure.com scope (which works for Azure-OpenAI on
+    # Foundry) is rejected here with "audience is incorrect (https://ai.azure.com)".
     global _token_provider
     if _token_provider is None:
         _token_provider = get_bearer_token_provider(
             DefaultAzureCredential(),
-            "https://cognitiveservices.azure.com/.default",
+            "https://ai.azure.com/.default",
         )
     return _token_provider()
 
